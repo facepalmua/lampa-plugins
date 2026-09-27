@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.0.0';
+    var VERSION = '2.0.1';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -97,6 +97,24 @@
     }
 
     // ---------------------------------------------------------------- movie page
+    function layout(body, row, e, refocus) {
+        KILL.forEach(function (sel) {
+            var els = body.querySelectorAll(sel);
+            for (var i = 0; i < els.length; i++) els[i].parentNode.removeChild(els[i]);
+        });
+        var tor = body.querySelector('.view--torrent');
+        var tr = body.querySelector('.view--trailer');
+        if (tor) { tor.classList.remove('hide'); if (row.firstChild !== tor) row.insertBefore(tor, row.firstChild); }
+        if (tr) { tr.classList.remove('hide'); if (tor && tor.nextSibling !== tr) row.insertBefore(tr, tor.nextSibling); }
+        if (refocus && tor && Lampa.Activity.active() && Lampa.Activity.active().component === 'full') {
+            try {
+                Lampa.Controller.toggle('full_start');
+                Lampa.Controller.collectionFocus(tor, e.link && e.link.scroll ? e.link.scroll.render() : row);
+            } catch (err) {}
+        }
+        return tor;
+    }
+
     function onFull(e) {
         if (e.type !== 'complite') return;
         var body = e.body && e.body[0] ? e.body[0] : null;
@@ -104,20 +122,9 @@
         var row = body.querySelector('.full-start-new__buttons') || body.querySelector('.full-start__buttons');
         if (!row) return;
 
-        KILL.forEach(function (sel) {
-            var els = body.querySelectorAll(sel);
-            for (var i = 0; i < els.length; i++) els[i].parentNode.removeChild(els[i]);
-        });
-
-        var tor = body.querySelector('.view--torrent');
-        var tr = body.querySelector('.view--trailer');
-        if (tor) { tor.classList.remove('hide'); row.insertBefore(tor, row.firstChild); }
-        if (tr) { tr.classList.remove('hide'); row.insertBefore(tr, tor ? tor.nextSibling : row.firstChild); }
-
-        try {
-            Lampa.Controller.toggle('full_start');
-            if (tor) Lampa.Controller.collectionFocus(tor, e.link && e.link.scroll ? e.link.scroll.render() : row);
-        } catch (err) {}
+        var tor = layout(body, row, e, true);
+        // other plugins add their buttons after 'complite' too - settle the order again
+        [300, 900, 2000].forEach(function (ms) { setTimeout(function () { layout(body, row, e, ms === 300); }, ms); });
 
         // live count on the torrents button
         var movie = e.data && e.data.movie;
