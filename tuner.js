@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.0.1';
+    var VERSION = '2.1.0';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -199,6 +199,44 @@
         }, 1500);
     }
 
+    // ---------------------------------------------------------------- playback speed (Samsung player)
+    // Lampa offers only "default / 2" with the Tizen player because old TVs can't do more.
+    // Tizen 9 AVPlay accepts fractional speeds, so show the full list and pass numbers through.
+    var SPEEDS = ['0.75', 'default', '1.25', '1.50', '1.75', '2'];
+
+    function patchSpeed() {
+        try {
+            var av = window.webapis && webapis.avplay;
+            if (av && !av.__tunerSpeed) {
+                var orig = av.setSpeed;
+                av.setSpeed = function (v) {
+                    var n = (v === 'default' || !v) ? 1 : parseFloat(v);
+                    return orig.call(av, isNaN(n) ? 1 : n);
+                };
+                av.__tunerSpeed = true;
+            }
+        } catch (e) {}
+
+        var show = Lampa.Select.show;
+        Lampa.Select.show = function (params) {
+            try {
+                var isSpeed = params && params.title === Lampa.Lang.translate('player_video_speed');
+                if (isSpeed && params.items && params.items.length <= 3 && Lampa.Storage.field('player') === 'tizen') {
+                    var cur = Lampa.Storage.get('tuner_speed', 'default');
+                    params.items = SPEEDS.map(function (v) {
+                        return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: v === cur };
+                    });
+                    var pick = params.onSelect;
+                    params.onSelect = function (a) {
+                        Lampa.Storage.set('tuner_speed', a.value);
+                        if (pick) pick(a);
+                    };
+                }
+            } catch (e) {}
+            return show.apply(this, arguments);
+        };
+    }
+
     // ---------------------------------------------------------------- start
     function startPlugin() {
         if (window.lampa_tuner_ready) return;
@@ -206,6 +244,7 @@
         applySettings();
         injectCss();
         Lampa.Listener.follow('full', onFull);
+        patchSpeed();
         watchFocus();
         paintCached();
         try {
