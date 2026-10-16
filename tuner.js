@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.1.0';
+    var VERSION = '2.1.1';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -205,6 +205,8 @@
     var SPEEDS = ['0.75', 'default', '1.25', '1.50', '1.75', '2'];
 
     function patchSpeed() {
+        var ps = Lampa.Storage.get('player_speed', 'default');
+        if (ps !== 'default' && ps !== '2') Lampa.Storage.set('player_speed', 'default');
         try {
             var av = window.webapis && webapis.avplay;
             if (av && !av.__tunerSpeed) {
@@ -230,6 +232,9 @@
                     params.onSelect = function (a) {
                         Lampa.Storage.set('tuner_speed', a.value);
                         if (pick) pick(a);
+                        // Lampa's own speed menu crashes if its stored value isn't "default" or "2",
+                        // so keep only those there; the real speed lives in tuner_speed.
+                        Lampa.Storage.set('player_speed', a.value === '2' ? '2' : 'default');
                     };
                 }
             } catch (e) {}
