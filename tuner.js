@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.4.0';
+    var VERSION = '2.4.1';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -350,15 +350,15 @@
                         var same = v === 'default' ? !sm : !!sm && parseFloat(v) === sm.rate;
                         return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: same };
                     });
-                    var back = params.onBack;
                     params.onSelect = function (a) {
                         Lampa.Storage.set('player_speed', 'default');
                         memSet(a.value);
                         autoToken++;                       // a manual choice cancels any pending auto-apply
+                        // close the whole menu branch (Настройки + Скорость) and give the remote back to the
+                        // player panel - the same place Back from "Настройки" lands in Lampa
+                        try { Lampa.Select.hide(); Lampa.Controller.toggle('player_panel'); } catch (e) {}
                         if (a.value === 'default') endSpeed(true);
                         else if (!sm || parseFloat(a.value) !== sm.rate) enterSpeed(parseFloat(a.value));
-                        // same as Lampa: go back to the player settings list; Back closes it as usual
-                        if (back) back(); else { try { Lampa.Select.close(); Lampa.Controller.toggle('player'); } catch (e) {} }
                     };
                 }
             } catch (e) {}
