@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.3.1';
+    var VERSION = '2.4.0';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -288,14 +288,54 @@
         });
     }
 
+    // ---- remembered speed per show (TMDB id of the card the player was opened from)
+    var MEM_KEY = 'tuner_speed_mem';
+    function showKey() {
+        try {
+            var a = Lampa.Activity.active() || {}, m = a.movie || a.card;
+            if (m && m.id) return ((m.name || m.original_name || m.first_air_date) ? 'tv' : 'mv') + m.id;
+        } catch (e) {}
+        return null;
+    }
+    function memGet() { var k = showKey(), m = Lampa.Storage.get(MEM_KEY, '{}') || {}; return k ? m[k] : null; }
+    function memSet(v) {
+        var k = showKey(); if (!k) return;
+        var m = Lampa.Storage.get(MEM_KEY, '{}') || {};
+        if (!v || v === 'default') delete m[k]; else m[k] = v;
+        Lampa.Storage.set(MEM_KEY, m);
+    }
+
+    var autoToken = 0;
+    function scheduleAuto() {                     // new episode/file started -> re-apply remembered speed
+        var my = ++autoToken, tries = 0, playingSince = 0;
+        (function poll() {
+            if (my !== autoToken || sm) return;
+            var r = memGet();
+            if (!r) return;
+            var st = '', pd = {};
+            try { st = av().getState(); pd = Lampa.Player.playdata() || {}; } catch (e) {}
+            var waiting = pd.timeline && pd.timeline.waiting_for_user;   // "continue from …?" prompt
+            if (st == 'PLAYING' && curMs() > 1500 && !waiting) {
+                if (!playingSince) playingSince = Date.now();
+                if (Date.now() - playingSince > 2500) {
+                    Lampa.Noty.show('Скорость ×' + parseFloat(r) + ' (запомнено для этого сериала)');
+                    return enterSpeed(parseFloat(r));
+                }
+            } else playingSince = 0;
+            if (tries++ < 90) setTimeout(poll, 1000);
+        })();
+    }
+
     function patchSpeed() {
         if (Lampa.Storage.get('player_speed', 'default') !== 'default') Lampa.Storage.set('player_speed', 'default');
 
         try {
             // user leaves the player while sped up -> save real position, stop the Mac encoder
             Lampa.Player.listener.follow('destroy', function () { endSpeed(false); });
-            // another episode / file started from the playlist -> that one plays normally
-            Lampa.Player.listener.follow('start', function () { if (sm) endSpeed(false); });
+            // a new video started (fresh play, or next/other episode from the playlist):
+            // finish speed mode for the old one, then re-apply the speed remembered for this show
+            Lampa.Player.listener.follow('start', function () { if (sm) endSpeed(false); scheduleAuto(); });
+            Lampa.PlayerPlaylist.listener.follow('select', function () { if (sm) endSpeed(false); scheduleAuto(); });
         } catch (e) {}
 
         // keep the saved position correct while watching sped up (every 30s)
@@ -310,11 +350,15 @@
                         var same = v === 'default' ? !sm : !!sm && parseFloat(v) === sm.rate;
                         return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: same };
                     });
+                    var back = params.onBack;
                     params.onSelect = function (a) {
                         Lampa.Storage.set('player_speed', 'default');
-                        try { Lampa.Select.close(); Lampa.Controller.toggle('player'); } catch (e) {}
+                        memSet(a.value);
+                        autoToken++;                       // a manual choice cancels any pending auto-apply
                         if (a.value === 'default') endSpeed(true);
                         else if (!sm || parseFloat(a.value) !== sm.rate) enterSpeed(parseFloat(a.value));
+                        // same as Lampa: go back to the player settings list; Back closes it as usual
+                        if (back) back(); else { try { Lampa.Select.close(); Lampa.Controller.toggle('player'); } catch (e) {} }
                     };
                 }
             } catch (e) {}
