@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.3.0';
+    var VERSION = '2.3.1';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -239,7 +239,9 @@
     }
 
     function swapVideo(url, seekSec) {
-        Lampa.PlayerVideo.url(url);
+        // same sequence Lampa uses when you switch quality: rebuild the video inside the open player
+        try { Lampa.PlayerVideo.destroy(true); } catch (e) {}
+        Lampa.PlayerVideo.url(url, true);
         if (seekSec == null) return;
         var n = 0;
         (function wait() {
