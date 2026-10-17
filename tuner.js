@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.2.0';
+    var VERSION = '2.3.0';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -201,22 +201,19 @@
 
     // ---------------------------------------------------------------- playback speed (Mac speed mode)
     // The Samsung player garbles audio when it speeds up, and the built-in player can't speed audio at all.
-    // So any speed other than normal is produced by the Speed Server on the Mac (ffmpeg, pitch-preserving
-    // atempo) and the TV just plays that stream at 1x. "Обычная" returns to the original at the same moment.
+    // Any speed other than normal is produced by the Speed Server on the Mac (ffmpeg, pitch-preserving
+    // atempo) as a seekable stream, and the TV plays it at 1x.
+    // v2.3: the video is swapped INSIDE the open player, so the playlist, the exit point and the
+    // panel stay intact; Lampa's own progress saving is paused and we save the real film position.
     var SPEED_SRV = 'http://192.168.1.234:8199';
     var SPEEDS = ['0.75', 'default', '1.25', '1.50', '1.75', '2'];
-    var sm = null;          // speed-mode state: {orig, rate, start, a}
-    var switching = false;  // true while we close/reopen the player ourselves
+    var sm = null;    // {origUrl, rate, start, a, tl}
 
     function av() { return window.webapis && webapis.avplay; }
     function curMs() { try { return av().getCurrentTime() || 0; } catch (e) { return 0; } }
+    function origPos() { var t = curMs() / 1000; return sm ? sm.start + t * sm.rate : t; }
 
-    function origPos() {                         // position in the ORIGINAL film, seconds
-        var t = curMs() / 1000;
-        return sm ? sm.start + t * sm.rate : t;
-    }
-
-    function audioN() {                          // n-th audio track currently selected
+    function audioN() {
         try {
             var list = av().getTotalTrackInfo().filter(function (t) { return t.type == 'AUDIO'; });
             var cur = av().getCurrentStreamInfo().filter(function (t) { return t.type == 'AUDIO'; })[0];
@@ -232,80 +229,89 @@
             if (x.readyState !== 4) return;
             var d = null;
             try { d = JSON.parse(x.responseText); } catch (e) {}
-            cb(x.status === 200 ? d : null, d);
+            if (cb) cb(x.status === 200 ? d : null, d);
         };
         x.send();
     }
 
-    function reopen(playdata, after) {
-        switching = true;
-        try { Lampa.Player.close(); } catch (e) {}
-        setTimeout(function () {
-            Lampa.Player.play(playdata);
-            switching = false;
-            if (after) after();
-        }, 700);
+    function playUrl(u) {
+        try { return Lampa.Torserver.toPlayUrl(u); } catch (e) { return u; }
     }
 
-    function seekWhenReady(sec) {
+    function swapVideo(url, seekSec) {
+        Lampa.PlayerVideo.url(url);
+        if (seekSec == null) return;
         var n = 0;
         (function wait() {
             var st = '';
             try { st = av().getState(); } catch (e) {}
             if (st == 'PLAYING' || st == 'PAUSED') {
-                try { av().seekTo(Math.max(0, Math.floor(sec * 1000))); } catch (e) {}
+                try { av().seekTo(Math.max(0, Math.floor(seekSec * 1000))); } catch (e) {}
             } else if (n++ < 60) setTimeout(wait, 500);
         })();
     }
 
+    function saveProgress(pos) {                  // write the REAL film position to Lampa's history
+        var tl = sm && sm.tl;
+        if (!tl || !tl.hash) return;
+        var dur = parseFloat(tl.duration) || 0;
+        tl.time = pos;
+        if (dur) tl.percent = Math.min(100, Math.round(pos / dur * 100));
+        try { Lampa.Timeline.update(tl); } catch (e) {}
+    }
+
+    function endSpeed(keepVideo) {                // leave speed mode; optionally return to original
+        if (!sm) return;
+        var pos = origPos(), s0 = sm;
+        saveProgress(pos);
+        if (s0.tl) s0.tl.stop_recording = false;
+        sm = null;
+        get(SPEED_SRV + '/stop');
+        if (keepVideo) swapVideo(s0.origUrl, pos);
+    }
+
     function enterSpeed(rate) {
-        var orig = sm ? sm.orig : Lampa.Player.playdata();
-        if (!orig || !orig.url) return Lampa.Noty.show('Ускорение: не найдено видео');
+        var pd = Lampa.Player.playdata();
+        if (!pd || !pd.url) return Lampa.Noty.show('Ускорение: не найдено видео');
+        var origUrl = sm ? sm.origUrl : playUrl(pd.url);
         var pos = origPos(), a = sm ? sm.a : audioN();
+        var tl = sm ? sm.tl : pd.timeline;
         Lampa.Noty.show('Ускоряю ×' + rate + '…');
-        get(SPEED_SRV + '/start?src=' + encodeURIComponent(orig.url) + '&rate=' + rate +
+        get(SPEED_SRV + '/start?src=' + encodeURIComponent(origUrl) + '&rate=' + rate +
             '&start=' + pos.toFixed(1) + '&a=' + a, function (d, err) {
             if (!d || !d.url) return Lampa.Noty.show('Ускорение не удалось: ' + ((err && err.error) || 'Mac не отвечает'));
-            sm = { orig: orig, rate: rate, start: pos, a: a };
-            reopen({ url: d.url, title: (orig.title || '') + ' · ×' + rate });
+            sm = { origUrl: origUrl, rate: rate, start: pos, a: a, tl: tl };
+            if (tl) tl.stop_recording = true;     // Lampa would otherwise save speed-stream times
+            swapVideo(d.url);
         });
     }
 
-    function exitSpeed() {
-        if (!sm) return;
-        var pos = origPos(), orig = sm.orig;
-        sm = null;
-        get(SPEED_SRV + '/stop', function () {});
-        reopen(orig, function () { seekWhenReady(pos); });
-    }
-
     function patchSpeed() {
-        var ps = Lampa.Storage.get('player_speed', 'default');
-        if (ps !== 'default') Lampa.Storage.set('player_speed', 'default');
+        if (Lampa.Storage.get('player_speed', 'default') !== 'default') Lampa.Storage.set('player_speed', 'default');
 
-        // leaving the player while in speed mode -> stop the Mac encoder
         try {
-            Lampa.Player.listener.follow('destroy', function () {
-                if (switching || !sm) return;
-                sm = null;
-                get(SPEED_SRV + '/stop', function () {});
-            });
+            // user leaves the player while sped up -> save real position, stop the Mac encoder
+            Lampa.Player.listener.follow('destroy', function () { endSpeed(false); });
+            // another episode / file started from the playlist -> that one plays normally
+            Lampa.Player.listener.follow('start', function () { if (sm) endSpeed(false); });
         } catch (e) {}
+
+        // keep the saved position correct while watching sped up (every 30s)
+        setInterval(function () { if (sm) saveProgress(origPos()); }, 30000);
 
         var show = Lampa.Select.show;
         Lampa.Select.show = function (params) {
             try {
                 var isSpeed = params && params.title === Lampa.Lang.translate('player_video_speed');
                 if (isSpeed && Lampa.Storage.field('player') === 'tizen') {
-                    var cur = sm ? String(sm.rate.toFixed(2)).replace(/0$/, '') : 'default';
                     params.items = SPEEDS.map(function (v) {
-                        var same = v === 'default' ? !sm : sm && parseFloat(v) === sm.rate;
-                        return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: !!same };
+                        var same = v === 'default' ? !sm : !!sm && parseFloat(v) === sm.rate;
+                        return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: same };
                     });
                     params.onSelect = function (a) {
-                        Lampa.Storage.set('player_speed', 'default');   // keep Lampa's own menu valid
+                        Lampa.Storage.set('player_speed', 'default');
                         try { Lampa.Select.close(); Lampa.Controller.toggle('player'); } catch (e) {}
-                        if (a.value === 'default') exitSpeed();
+                        if (a.value === 'default') endSpeed(true);
                         else if (!sm || parseFloat(a.value) !== sm.rate) enterSpeed(parseFloat(a.value));
                     };
                 }
