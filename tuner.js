@@ -12,7 +12,7 @@
      *    when the Smart Parser finds nothing for that exact title + year
      */
 
-    var VERSION = '2.1.1';
+    var VERSION = '2.2.0';
     var SMART = 'http://192.168.1.234:9118';
     var CACHE_KEY = 'tuner_torrent_counts';
     var CACHE_TTL = 12 * 3600 * 1000;
@@ -199,42 +199,114 @@
         }, 1500);
     }
 
-    // ---------------------------------------------------------------- playback speed (Samsung player)
-    // Lampa offers only "default / 2" with the Tizen player because old TVs can't do more.
-    // Tizen 9 AVPlay accepts fractional speeds, so show the full list and pass numbers through.
+    // ---------------------------------------------------------------- playback speed (Mac speed mode)
+    // The Samsung player garbles audio when it speeds up, and the built-in player can't speed audio at all.
+    // So any speed other than normal is produced by the Speed Server on the Mac (ffmpeg, pitch-preserving
+    // atempo) and the TV just plays that stream at 1x. "Обычная" returns to the original at the same moment.
+    var SPEED_SRV = 'http://192.168.1.234:8199';
     var SPEEDS = ['0.75', 'default', '1.25', '1.50', '1.75', '2'];
+    var sm = null;          // speed-mode state: {orig, rate, start, a}
+    var switching = false;  // true while we close/reopen the player ourselves
+
+    function av() { return window.webapis && webapis.avplay; }
+    function curMs() { try { return av().getCurrentTime() || 0; } catch (e) { return 0; } }
+
+    function origPos() {                         // position in the ORIGINAL film, seconds
+        var t = curMs() / 1000;
+        return sm ? sm.start + t * sm.rate : t;
+    }
+
+    function audioN() {                          // n-th audio track currently selected
+        try {
+            var list = av().getTotalTrackInfo().filter(function (t) { return t.type == 'AUDIO'; });
+            var cur = av().getCurrentStreamInfo().filter(function (t) { return t.type == 'AUDIO'; })[0];
+            for (var i = 0; i < list.length; i++) if (cur && list[i].index == cur.index) return i;
+        } catch (e) {}
+        return 0;
+    }
+
+    function get(url, cb) {
+        var x = new XMLHttpRequest();
+        x.open('GET', url, true);
+        x.onreadystatechange = function () {
+            if (x.readyState !== 4) return;
+            var d = null;
+            try { d = JSON.parse(x.responseText); } catch (e) {}
+            cb(x.status === 200 ? d : null, d);
+        };
+        x.send();
+    }
+
+    function reopen(playdata, after) {
+        switching = true;
+        try { Lampa.Player.close(); } catch (e) {}
+        setTimeout(function () {
+            Lampa.Player.play(playdata);
+            switching = false;
+            if (after) after();
+        }, 700);
+    }
+
+    function seekWhenReady(sec) {
+        var n = 0;
+        (function wait() {
+            var st = '';
+            try { st = av().getState(); } catch (e) {}
+            if (st == 'PLAYING' || st == 'PAUSED') {
+                try { av().seekTo(Math.max(0, Math.floor(sec * 1000))); } catch (e) {}
+            } else if (n++ < 60) setTimeout(wait, 500);
+        })();
+    }
+
+    function enterSpeed(rate) {
+        var orig = sm ? sm.orig : Lampa.Player.playdata();
+        if (!orig || !orig.url) return Lampa.Noty.show('Ускорение: не найдено видео');
+        var pos = origPos(), a = sm ? sm.a : audioN();
+        Lampa.Noty.show('Ускоряю ×' + rate + '…');
+        get(SPEED_SRV + '/start?src=' + encodeURIComponent(orig.url) + '&rate=' + rate +
+            '&start=' + pos.toFixed(1) + '&a=' + a, function (d, err) {
+            if (!d || !d.url) return Lampa.Noty.show('Ускорение не удалось: ' + ((err && err.error) || 'Mac не отвечает'));
+            sm = { orig: orig, rate: rate, start: pos, a: a };
+            reopen({ url: d.url, title: (orig.title || '') + ' · ×' + rate });
+        });
+    }
+
+    function exitSpeed() {
+        if (!sm) return;
+        var pos = origPos(), orig = sm.orig;
+        sm = null;
+        get(SPEED_SRV + '/stop', function () {});
+        reopen(orig, function () { seekWhenReady(pos); });
+    }
 
     function patchSpeed() {
         var ps = Lampa.Storage.get('player_speed', 'default');
-        if (ps !== 'default' && ps !== '2') Lampa.Storage.set('player_speed', 'default');
+        if (ps !== 'default') Lampa.Storage.set('player_speed', 'default');
+
+        // leaving the player while in speed mode -> stop the Mac encoder
         try {
-            var av = window.webapis && webapis.avplay;
-            if (av && !av.__tunerSpeed) {
-                var orig = av.setSpeed;
-                av.setSpeed = function (v) {
-                    var n = (v === 'default' || !v) ? 1 : parseFloat(v);
-                    return orig.call(av, isNaN(n) ? 1 : n);
-                };
-                av.__tunerSpeed = true;
-            }
+            Lampa.Player.listener.follow('destroy', function () {
+                if (switching || !sm) return;
+                sm = null;
+                get(SPEED_SRV + '/stop', function () {});
+            });
         } catch (e) {}
 
         var show = Lampa.Select.show;
         Lampa.Select.show = function (params) {
             try {
                 var isSpeed = params && params.title === Lampa.Lang.translate('player_video_speed');
-                if (isSpeed && params.items && params.items.length <= 3 && Lampa.Storage.field('player') === 'tizen') {
-                    var cur = Lampa.Storage.get('tuner_speed', 'default');
+                if (isSpeed && Lampa.Storage.field('player') === 'tizen') {
+                    var cur = sm ? String(sm.rate.toFixed(2)).replace(/0$/, '') : 'default';
                     params.items = SPEEDS.map(function (v) {
-                        return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: v === cur };
+                        var same = v === 'default' ? !sm : sm && parseFloat(v) === sm.rate;
+                        return { title: v === 'default' ? Lampa.Lang.translate('player_speed_default_title') : v, value: v, selected: !!same };
                     });
-                    var pick = params.onSelect;
                     params.onSelect = function (a) {
-                        Lampa.Storage.set('tuner_speed', a.value);
-                        if (pick) pick(a);
-                        // Lampa's own speed menu crashes if its stored value isn't "default" or "2",
-                        // so keep only those there; the real speed lives in tuner_speed.
-                        Lampa.Storage.set('player_speed', a.value === '2' ? '2' : 'default');
+                        Lampa.Storage.set('player_speed', 'default');   // keep Lampa's own menu valid
+                        try { Lampa.Select.close(); Lampa.Controller.toggle('player'); } catch (e) {}
+                        if (a.value === 'default') exitSpeed();
+                        else if (!sm || parseFloat(a.value) !== sm.rate) enterSpeed(parseFloat(a.value));
                     };
                 }
             } catch (e) {}
